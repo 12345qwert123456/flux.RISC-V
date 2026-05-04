@@ -1,0 +1,253 @@
+name: Build FluxCD for linux/riscv64
+
+# Trigger on changes to Dockerfiles/workflow, weekly for new release tags,
+# or manually (optionally targeting a single component).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dockerfiles/**"
+      - "test/**"
+      - ".github/workflows/build-riscv64.yml"
+  schedule:
+    # Every Monday at 04:00 UTC — picks up new FluxCD release tags
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      component:
+        description: "Single component to build (leave empty for all)"
+        required: false
+        default: ""
+      force:
+        description: "Force rebuild even if the release already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: "${{ matrix.component.name }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          # ── flux CLI ──────────────────────────────────────────────────────
+          - name: flux2
+            repo: fluxcd/flux2
+            image: flux
+            dockerfile: dockerfiles/flux2/Dockerfile
+            binary: /usr/local/bin/flux
+            # --client: prints local version without contacting a cluster
+            smoke_cmd: "version --client"
+
+          # ── controllers ───────────────────────────────────────────────────
+          - name: source-controller
+            repo: fluxcd/source-controller
+            image: source-controller
+            dockerfile: dockerfiles/source-controller/Dockerfile
+            binary: /manager
+            smoke_cmd: ""
+
+          - name: kustomize-controller
+            repo: fluxcd/kustomize-controller
+            image: kustomize-controller
+            dockerfile: dockerfiles/kustomize-controller/Dockerfile
+            binary: /manager
+            smoke_cmd: ""
+
+          - name: helm-controller
+            repo: fluxcd/helm-controller
+            image: helm-controller
+            dockerfile: dockerfiles/helm-controller/Dockerfile
+            binary: /manager
+            smoke_cmd: ""
+
+          - name: notification-controller
+            repo: fluxcd/notification-controller
+            image: notification-controller
+            dockerfile: dockerfiles/notification-controller/Dockerfile
+            binary: /manager
+            smoke_cmd: ""
+
+          - name: image-reflector-controller
+            repo: fluxcd/image-reflector-controller
+            image: image-reflector-controller
+            dockerfile: dockerfiles/image-reflector-controller/Dockerfile
+            binary: /manager
+            smoke_cmd: ""
+
+          - name: image-automation-controller
+            repo: fluxcd/image-automation-controller
+            image: image-automation-controller
+            dockerfile: dockerfiles/image-automation-controller/Dockerfile
+            binary: /manager
+            smoke_cmd: ""
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Skip matrix job when a specific component was requested via
+      # workflow_dispatch and this job is not that component.
+      - name: Check if this component was requested
+        id: skip
+        run: |
+          REQUESTED="${{ github.event.inputs.component }}"
+          if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "${{ matrix.component.name }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── QEMU binfmt (needed to RUN riscv64 containers during smoke tests) ──
+      - name: Set up QEMU
+        if: steps.skip.outputs.skip != 'true'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+
+      # ── Docker Buildx (multi-platform builds, GHA layer cache) ─────────────
+      - name: Set up Docker Buildx
+        if: steps.skip.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      # ── Resolve latest upstream release tag and skip if already published ────
+      - name: Resolve version and check if already released
+        if: steps.skip.outputs.skip != 'true'
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(curl -sf \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${{ matrix.component.repo }}/releases/latest" \
+            | jq -r '.tag_name')
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::Failed to resolve latest version for ${{ matrix.component.repo }}"
+            exit 1
+          fi
+
+          IMAGE="${{ matrix.component.image }}:${VERSION}-riscv64"
+          VERSION_SHORT="${VERSION#v}"
+          RELEASE_TAG="${{ matrix.component.name }}-${VERSION}-riscv64"
+
+          echo "version=${VERSION}"             >> "$GITHUB_OUTPUT"
+          echo "version_short=${VERSION_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}"                 >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}"     >> "$GITHUB_OUTPUT"
+          echo "Resolved: ${IMAGE} (release tag: ${RELEASE_TAG})"
+
+          # Skip if release already exists, unless force=true
+          if [ "${{ inputs.force }}" != "true" ]; then
+            if gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" &>/dev/null; then
+              echo "Release ${RELEASE_TAG} already exists, skipping."
+              echo "already_released=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "already_released=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "Force flag set — rebuilding regardless."
+            echo "already_released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Build riscv64 image ─────────────────────────────────────────────────
+      # Builder stage runs on the native amd64 runner (no QEMU).
+      # The final stage has NO RUN instructions, so QEMU is also not needed
+      # during image construction — only during the smoke-test step below.
+      - name: Build linux/riscv64 image
+        if: steps.skip.outputs.skip != 'true' && steps.version.outputs.already_released != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: "."
+          file: "${{ matrix.component.dockerfile }}"
+          platforms: linux/riscv64
+          # --load imports the image into the local Docker daemon so we can
+          # docker inspect / docker run it in subsequent steps.
+          load: true
+          push: false
+          tags: "${{ steps.version.outputs.image }}"
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          # Cache layers in GHA cache, scoped per component to avoid eviction.
+          cache-from: type=gha,scope=${{ matrix.component.name }}
+          cache-to:   type=gha,scope=${{ matrix.component.name }},mode=max
+
+      # ── Smoke test ─────────────────────────────────────────────────────────
+      # 1. Verifies the image manifest reports Architecture=riscv64.
+      # 2. Confirms the binary exists inside the container.
+      # 3. Attempts to run the binary (QEMU binfmt is active here).
+      - name: Smoke test
+        if: steps.skip.outputs.skip != 'true' && steps.version.outputs.already_released != 'true'
+        run: |
+          chmod +x test/smoke-test.sh
+          ./test/smoke-test.sh \
+            "${{ steps.version.outputs.image }}" \
+            "${{ matrix.component.binary }}" \
+            "${{ matrix.component.smoke_cmd }}"
+
+      # ── Log in to Docker Hub ────────────────────────────────────────────────
+      - name: Log in to Docker Hub
+        if: steps.skip.outputs.skip != 'true' && steps.version.outputs.already_released != 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ── Push image to Docker Hub ─────────────────────────────────────────────
+      - name: Push image to Docker Hub
+        if: steps.skip.outputs.skip != 'true' && steps.version.outputs.already_released != 'true'
+        run: |
+          SRC="${{ steps.version.outputs.image }}"
+          HUB="${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component.image }}-riscv64"
+          VERSION_SHORT="${{ steps.version.outputs.version_short }}"
+          docker tag "${SRC}" "${HUB}:${VERSION_SHORT}"
+          docker tag "${SRC}" "${HUB}:latest"
+          docker push "${HUB}:${VERSION_SHORT}"
+          docker push "${HUB}:latest"
+          echo "Pushed: ${HUB}:${VERSION_SHORT} and ${HUB}:latest"
+
+      # ── Package image archive + checksums ────────────────────────────────────
+      - name: Package image archive and checksums
+        if: steps.skip.outputs.skip != 'true' && steps.version.outputs.already_released != 'true'
+        run: |
+          IMAGE="${{ steps.version.outputs.image }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          TARNAME="${{ matrix.component.image }}-${VERSION}-riscv64.tar.gz"
+          docker save "${IMAGE}" | gzip > "${TARNAME}"
+          sha256sum "${TARNAME}" > SHA256SUMS
+          echo "TARNAME=${TARNAME}" >> "$GITHUB_ENV"
+          echo "Packaged: ${TARNAME} ($(du -sh "${TARNAME}" | cut -f1))"
+
+      # ── Create GitHub Release ────────────────────────────────────────────────
+      - name: Create GitHub Release
+        if: steps.skip.outputs.skip != 'true' && steps.version.outputs.already_released != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_SHORT="${{ steps.version.outputs.version_short }}"
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+          HUB="${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component.image }}-riscv64"
+
+          printf '%s\n' \
+            "Unofficial automated build of [${{ matrix.component.name }} ${VERSION}](https://github.com/${{ matrix.component.repo }}/releases/tag/${VERSION}) for the **linux/riscv64** architecture." \
+            "" \
+            "No patches are applied to the upstream source." \
+            "" \
+            "**Docker:**" \
+            '```' \
+            "docker pull ${HUB}:${VERSION_SHORT}" \
+            '```' \
+            > release-notes.md
+
+          gh release create "${RELEASE_TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ matrix.component.name }} ${VERSION} for linux/riscv64" \
+            --notes-file release-notes.md \
+            "${TARNAME}" \
+            "SHA256SUMS"

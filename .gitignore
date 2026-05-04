@@ -1,0 +1,16 @@
+# Build artifacts
+*.tar
+*.tar.gz
+*.zip
+SHA256SUMS
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
