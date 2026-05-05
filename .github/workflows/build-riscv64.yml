@@ -132,7 +132,7 @@ jobs:
             exit 1
           fi
 
-          IMAGE="${{ matrix.component.image }}:${VERSION}-riscv64"
+          IMAGE="${{ matrix.component.image }}:${VERSION}"
           VERSION_SHORT="${VERSION#v}"
           RELEASE_TAG="${{ matrix.component.name }}-${VERSION}-riscv64"
 
@@ -203,7 +203,7 @@ jobs:
         if: steps.skip.outputs.skip != 'true' && steps.version.outputs.already_released != 'true'
         run: |
           SRC="${{ steps.version.outputs.image }}"
-          HUB="${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component.image }}-riscv64"
+          HUB="${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component.image }}"
           VERSION_SHORT="${{ steps.version.outputs.version_short }}"
           docker tag "${SRC}" "${HUB}:${VERSION_SHORT}"
           docker tag "${SRC}" "${HUB}:latest"
@@ -232,7 +232,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           VERSION_SHORT="${{ steps.version.outputs.version_short }}"
           RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
-          HUB="${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component.image }}-riscv64"
+          HUB="${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component.image }}"
 
           printf '%s\n' \
             "Unofficial automated build of [${{ matrix.component.name }} ${VERSION}](https://github.com/${{ matrix.component.repo }}/releases/tag/${VERSION}) for the **linux/riscv64** architecture." \
