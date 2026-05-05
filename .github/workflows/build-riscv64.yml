@@ -204,12 +204,12 @@ jobs:
         run: |
           SRC="${{ steps.version.outputs.image }}"
           HUB="${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.component.image }}"
-          VERSION_SHORT="${{ steps.version.outputs.version_short }}"
-          docker tag "${SRC}" "${HUB}:${VERSION_SHORT}"
+          VERSION="${{ steps.version.outputs.version }}"
+          docker tag "${SRC}" "${HUB}:${VERSION}"
           docker tag "${SRC}" "${HUB}:latest"
-          docker push "${HUB}:${VERSION_SHORT}"
+          docker push "${HUB}:${VERSION}"
           docker push "${HUB}:latest"
-          echo "Pushed: ${HUB}:${VERSION_SHORT} and ${HUB}:latest"
+          echo "Pushed: ${HUB}:${VERSION} and ${HUB}:latest"
 
       # ── Package image archive + checksums ────────────────────────────────────
       - name: Package image archive and checksums
