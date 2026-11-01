@@ -16,7 +16,7 @@
 #     dockerfiles/kustomize-controller/
 # =============================================================================
 
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.27
 ARG XX_VERSION=1.9.0
 ARG ALPINE_VERSION=3.23
 
